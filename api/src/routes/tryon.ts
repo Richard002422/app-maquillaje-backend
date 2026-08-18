@@ -5,7 +5,7 @@ import type { Env } from '../config.js'
 import { prisma } from '../lib/prisma.js'
 import { requireAuth } from '../middleware/authenticate.js'
 import { HttpError } from '../middleware/httpError.js'
-import { callAiTryOn } from '../services/aiClient.js'
+import { callAiHairColor, callAiTryOn } from '../services/aiClient.js'
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -14,6 +14,24 @@ const upload = multer({
 
 const bodySchema = z.object({
   lookId: z.string().min(1).max(64),
+})
+
+// Debe coincidir con las claves de HAIR_COLORS en backend/ai-service/app/services/hair_color.py
+const HAIR_COLOR_IDS = [
+  'rubio-platino',
+  'rubio-dorado',
+  'castano-claro',
+  'castano-chocolate',
+  'negro-azabache',
+  'pelirrojo-cobrizo',
+  'caoba',
+  'rosa-pastel',
+  'azul-noche',
+  'gris-plata',
+] as const
+
+const hairColorBodySchema = z.object({
+  colorId: z.enum(HAIR_COLOR_IDS),
 })
 
 export function tryOnRouter(env: Env) {
@@ -61,6 +79,41 @@ export function tryOnRouter(env: Env) {
         sessionId: created.id,
         previewUrl: ai.preview_url,
         maskUrls: ai.mask_urls,
+        latencyMs: ai.latency_ms,
+        note: ai.note,
+      })
+    } catch (e) {
+      next(e)
+    }
+  })
+
+  // Coloración de cabello con Gemini. A diferencia de POST "/", no persiste
+  // sesión ni imagen en el servidor: la selfie del usuario sólo viaja hasta
+  // el servicio de IA y la respuesta se devuelve como data URL efímera.
+  r.post('/hair-color', upload.single('image'), async (req, res, next) => {
+    try {
+      if (!req.file?.buffer) {
+        throw new HttpError(400, 'Campo multipart "image" requerido', 'MISSING_IMAGE')
+      }
+      const parsed = hairColorBodySchema.safeParse({ colorId: req.body.colorId })
+      if (!parsed.success) {
+        throw new HttpError(400, 'colorId inválido', 'VALIDATION_ERROR', parsed.error.flatten())
+      }
+
+      const ai = await callAiHairColor(
+        env,
+        {
+          colorId: parsed.data.colorId,
+          image: req.file.buffer,
+          filename: req.file.originalname || 'upload.jpg',
+        },
+        { requestId: req.requestId },
+      )
+
+      return res.status(200).json({
+        imageDataUrl: ai.image_data_url,
+        colorId: ai.color_id,
+        colorLabel: ai.color_label,
         latencyMs: ai.latency_ms,
         note: ai.note,
       })
